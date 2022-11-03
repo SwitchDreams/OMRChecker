@@ -43,7 +43,6 @@ from .template import Template
 PROCESSOR_MANAGER = ProcessorManager()
 STATS = constants.Stats()
 
-
 # TODO(beginner task) :-
 # from colorama import init
 # init()
@@ -56,6 +55,7 @@ def entry_point(root_dir, curr_dir, args):
 
 # TODO: make this function pure
 def process_dir(root_dir, curr_dir, args, template=None, url=None):
+
     # Update local template (in current recursion stack)
     local_template_path = curr_dir.joinpath(constants.TEMPLATE_FILENAME)
     if os.path.exists(local_template_path):
@@ -67,6 +67,9 @@ def process_dir(root_dir, curr_dir, args, template=None, url=None):
     paths = constants.Paths(Path(args["output_dir"], curr_dir.relative_to(root_dir)))
 
     # look for images in current dir to process
+    # exts = ("*.png", "*.jpg")
+    # omr_files = sorted([f for ext in exts for f in curr_dir.glob(ext)])
+
     # exts = ("*.png", "*.jpg")
     # omr_files = sorted([f for ext in exts for f in curr_dir.glob(ext)])
     omr_files = None
@@ -271,134 +274,132 @@ def process_files(omr_files, template, args, out):
         else:
             in_omr = cv2.imread(str(file_path), cv2.IMREAD_GRAYSCALE)
 
-    logger.info(
-        f"\n({files_counter}) Opening image: \t{file_path}\tResolution: {in_omr.shape}"
-    )
+        logger.info(
+            f"\n({files_counter}) Opening image: \t{file_path}\tResolution: {in_omr.shape}"
+        )
 
-    # TODO: Get rid of saveImgList
-    for i in range(ImageUtils.save_image_level):
-        ImageUtils.reset_save_img(i + 1)
+        # TODO: Get rid of saveImgList
+        for i in range(ImageUtils.save_image_level):
+            ImageUtils.reset_save_img(i + 1)
 
-    ImageUtils.append_save_img(1, in_omr)
+        ImageUtils.append_save_img(1, in_omr)
 
-    # resize to conform to template
-    in_omr = ImageUtils.resize_util(
-        in_omr,
-        config.dimensions.processing_width,
-        config.dimensions.processing_height,
-    )
+        # resize to conform to template
+        in_omr = ImageUtils.resize_util(
+            in_omr,
+            config.dimensions.processing_width,
+            config.dimensions.processing_height,
+        )
 
-    # run pre_processors in sequence
-    for pre_processor in template.pre_processors:
-        in_omr = pre_processor.apply_filter(in_omr, args)
+        # run pre_processors in sequence
+        for pre_processor in template.pre_processors:
+            in_omr = pre_processor.apply_filter(in_omr, args)
 
-    if in_omr is None:
-        # Error OMR case
-        new_file_path = out.paths.errors_dir + file_name
-        out.OUTPUT_SET.append([file_name] + out.empty_resp)
-        if check_and_move(
+        if in_omr is None:
+            # Error OMR case
+            new_file_path = out.paths.errors_dir + file_name
+            out.OUTPUT_SET.append([file_name] + out.empty_resp)
+            if check_and_move(
                 constants.ERROR_CODES.NO_MARKER_ERR, file_path, new_file_path
-        ):
-            err_line = [file_name, file_path, new_file_path, "NA"] + out.empty_resp
-            pd.DataFrame(err_line, dtype=str).T.to_csv(
-                out.files_obj["Errors"],
+            ):
+                err_line = [file_name, file_path, new_file_path, "NA"] + out.empty_resp
+                pd.DataFrame(err_line, dtype=str).T.to_csv(
+                    out.files_obj["Errors"],
+                    mode="a",
+                    quoting=QUOTE_NONNUMERIC,
+                    header=False,
+                    index=False,
+                )
+            continue
+
+        if args["setLayout"]:
+            template_layout = draw_template_layout(
+                in_omr, template, shifted=False, border=2
+            )
+            MainOperations.show("Template Layout", template_layout, 1, 1)
+            continue
+
+        # uniquify
+        file_id = str(file_name)
+        save_dir = out.paths.save_marked_dir
+        response_dict, final_marked, multi_marked, _ = MainOperations.read_response(
+            template,
+            image=in_omr,
+            name=file_id,
+            save_dir=save_dir,
+            auto_align=args["autoAlign"],
+        )
+
+        # concatenate roll nos, set unmarked responses, etc
+        resp = process_omr(template, response_dict)
+        logger.info("\nRead Response: \t", resp, "\n")
+        if config.outputs.show_image_level >= 2:
+            MainOperations.show(
+                "Final Marked Bubbles : " + file_id,
+                ImageUtils.resize_util_h(
+                    final_marked, int(config.dimensions.display_height * 1.3)
+                ),
+                1,
+                1,
+            )
+
+        # This evaluates and returns the score attribute
+        # TODO: Automatic scoring
+        # score = evaluate(resp, explain_scoring=config.outputs.explain_scoring)
+        score = 0
+
+        resp_array = []
+        for k in out.resp_cols:
+            resp_array.append(resp[k])
+
+        out.OUTPUT_SET.append([file_name] + resp_array)
+
+        # TODO: Add roll number validation here
+        if multi_marked == 0:
+            STATS.files_not_moved += 1
+            new_file_path = save_dir + file_id
+            # Enter into Results sheet-
+            results_line = [file_name, file_path, new_file_path, score] + resp_array
+            # Write/Append to results_line file(opened in append mode)
+            pd.DataFrame(results_line, dtype=str).T.to_csv(
+                out.files_obj["Results"],
                 mode="a",
                 quoting=QUOTE_NONNUMERIC,
                 header=False,
                 index=False,
             )
-        continue
-
-    if args["setLayout"]:
-        template_layout = draw_template_layout(
-            in_omr, template, shifted=False, border=2
-        )
-        MainOperations.show("Template Layout", template_layout, 1, 1)
-        continue
-
-    # uniquify
-    file_id = str(file_name)
-    save_dir = out.paths.save_marked_dir
-    response_dict, final_marked, multi_marked, _ = MainOperations.read_response(
-        template,
-        image=in_omr,
-        name=file_id,
-        save_dir=save_dir,
-        auto_align=args["autoAlign"],
-    )
-
-    # concatenate roll nos, set unmarked responses, etc
-    resp = process_omr(template, response_dict)
-    logger.info("\nRead Response: \t", resp, "\n")
-    if config.outputs.show_image_level >= 2:
-        MainOperations.show(
-            "Final Marked Bubbles : " + file_id,
-            ImageUtils.resize_util_h(
-                final_marked, int(config.dimensions.display_height * 1.3)
-            ),
-            1,
-            1,
-        )
-
-    # This evaluates and returns the score attribute
-    # TODO: Automatic scoring
-    # score = evaluate(resp, explain_scoring=config.outputs.explain_scoring)
-    score = 0
-
-    resp_array = []
-    for k in out.resp_cols:
-        resp_array.append(resp[k])
-
-    out.OUTPUT_SET.append([file_name] + resp_array)
-
-    # TODO: Add roll number validation here
-    if multi_marked == 0:
-        STATS.files_not_moved += 1
-        new_file_path = save_dir + file_id
-        # Enter into Results sheet-
-        results_line = [file_name, file_path, new_file_path, score] + resp_array
-        # Write/Append to results_line file(opened in append mode)
-        pd.DataFrame(results_line, dtype=str).T.to_csv(
-            out.files_obj["Results"],
-            mode="a",
-            quoting=QUOTE_NONNUMERIC,
-            header=False,
-            index=False,
-        )
-        # Todo: Add score calculation from template.json
-        # print(
-        #     "[%d] Graded with score: %.2f" % (files_counter, score),
-        #     "\t file_id: ",
-        #     file_id,
-        # )
-        # print(files_counter,file_id,resp['Roll'],'score : ',score)
-    else:
-        # multi_marked file
-        logger.info("[%d] multi_marked, moving File: %s" % (files_counter, file_id))
-        new_file_path = out.paths.multi_marked_dir + file_name
-        if check_and_move(
+            # Todo: Add score calculation from template.json
+            # print(
+            #     "[%d] Graded with score: %.2f" % (files_counter, score),
+            #     "\t file_id: ",
+            #     file_id,
+            # )
+            # print(files_counter,file_id,resp['Roll'],'score : ',score)
+        else:
+            # multi_marked file
+            logger.info("[%d] multi_marked, moving File: %s" % (files_counter, file_id))
+            new_file_path = out.paths.multi_marked_dir + file_name
+            if check_and_move(
                 constants.ERROR_CODES.MULTI_BUBBLE_WARN, file_path, new_file_path
-        ):
-            mm_line = [file_name, file_path, new_file_path, "NA"] + resp_array
-            pd.DataFrame(mm_line, dtype=str).T.to_csv(
-                out.files_obj["MultiMarked"],
-                mode="a",
-                quoting=QUOTE_NONNUMERIC,
-                header=False,
-                index=False,
-            )
-        # else:
-        #     TODO:  Add appropriate record handling here
-        #     pass
+            ):
+                mm_line = [file_name, file_path, new_file_path, "NA"] + resp_array
+                pd.DataFrame(mm_line, dtype=str).T.to_csv(
+                    out.files_obj["MultiMarked"],
+                    mode="a",
+                    quoting=QUOTE_NONNUMERIC,
+                    header=False,
+                    index=False,
+                )
+            # else:
+            #     TODO:  Add appropriate record handling here
+            #     pass
 
+    print_stats(start_time, files_counter)
 
-print_stats(start_time, files_counter)
-
-
-# flush after every 20 files for a live view
-# if(files_counter % 20 == 0 or files_counter == len(omr_files)):
-#     for file_key in out.filesMap.keys():
-#         out.files_obj[file_key].flush()
+    # flush after every 20 files for a live view
+    # if(files_counter % 20 == 0 or files_counter == len(omr_files)):
+    #     for file_key in out.filesMap.keys():
+    #         out.files_obj[file_key].flush()
 
 
 def print_stats(start_time, files_counter):
